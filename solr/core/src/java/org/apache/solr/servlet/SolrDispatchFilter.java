@@ -38,9 +38,11 @@ import java.lang.invoke.MethodHandles;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
+import java.util.Collections;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Locale;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -67,6 +69,8 @@ import org.apache.solr.common.SolrException;
 import org.apache.solr.common.SolrException.ErrorCode;
 import org.apache.solr.common.cloud.SolrZkClient;
 import org.apache.solr.common.util.ExecutorUtil;
+import org.apache.solr.common.util.RetryUtil;
+import org.apache.solr.core.*;
 import org.apache.solr.core.CoreContainer;
 import org.apache.solr.core.NodeConfig;
 import org.apache.solr.core.SolrCore;
@@ -98,6 +102,8 @@ import static org.apache.solr.security.AuditEvent.EventType;
  */
 public class SolrDispatchFilter extends BaseSolrFilter {
   private static final Logger log = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+  public static final long DEFAULT_ZK_RETRY_TIMEOUT = 24 * 60 * 60 * 1000L;
+  public static final long DEFAULT_ZK_RETRY_PERIOD = 30 * 1000L;
 
   protected volatile CoreContainer cores;
   protected final CountDownLatch init = new CountDownLatch(1);
@@ -106,7 +112,7 @@ public class SolrDispatchFilter extends BaseSolrFilter {
   //TODO using Http2Client
   protected HttpClient httpClient;
   private ArrayList<Pattern> excludePatterns;
-  
+
   private boolean isV2Enabled = !"true".equals(System.getProperty("disable.v2.api", "false"));
 
   private final String metricTag = SolrMetricProducer.getUniqueMetricTag(this, null);
@@ -278,11 +284,18 @@ public class SolrDispatchFilter extends BaseSolrFilter {
   }
   
   /**
+   * Will try to read config from zookeeper until it times out
    * Override this to change CoreContainer initialization
    * @return a CoreContainer to hold this server's cores
    */
-  protected CoreContainer createCoreContainer(Path solrHome, Properties nodeProps) {
-    NodeConfig nodeConfig = loadNodeConfig(solrHome, nodeProps);
+  protected CoreContainer createCoreContainer(Path solrHome, Properties extraProperties) throws Exception {
+    final long startupZkRetryTimeout = Optional.ofNullable(System.getProperty("startupZkRetryTimeout")).map(Long::parseLong).orElse(DEFAULT_ZK_RETRY_TIMEOUT);
+    final long startupZkRetryPeriod = Optional.ofNullable(System.getProperty("startupZkRetryPeriod")).map(Long::parseLong).orElse(DEFAULT_ZK_RETRY_PERIOD);
+    final NodeConfig nodeConfig = RetryUtil.retry(Collections.singleton(SolrException.class),
+            startupZkRetryTimeout,
+            startupZkRetryPeriod,
+            ()->loadNodeConfig(solrHome, extraProperties));
+
     final CoreContainer coreContainer = new CoreContainer(nodeConfig, true);
     coreContainer.load();
     return coreContainer;
@@ -327,7 +340,7 @@ public class SolrDispatchFilter extends BaseSolrFilter {
       close();
     }
   }
-  
+
   public void close() {
     CoreContainer cc = cores;
     cores = null;
@@ -502,7 +515,7 @@ public class SolrDispatchFilter extends BaseSolrFilter {
         log.debug("Pass through PKI authentication endpoint");
         return true;
       }
-      // /solr/ (Admin UI) must be always open to allow displaying Admin UI with login page  
+      // /solr/ (Admin UI) must be always open to allow displaying Admin UI with login page
       if ("/solr/".equals(requestPath) || "/".equals(requestPath)) {
         log.debug("Pass through Admin UI entry point");
         return true;
@@ -544,7 +557,7 @@ public class SolrDispatchFilter extends BaseSolrFilter {
   }
   
   public static class ClosedServletInputStream extends ServletInputStream {
-    
+
     public static final ClosedServletInputStream CLOSED_SERVLET_INPUT_STREAM = new ClosedServletInputStream();
 
     @Override
@@ -565,16 +578,16 @@ public class SolrDispatchFilter extends BaseSolrFilter {
     @Override
     public void setReadListener(ReadListener arg0) {}
   }
-  
+
   public static class ClosedServletOutputStream extends ServletOutputStream {
-    
+
     public static final ClosedServletOutputStream CLOSED_SERVLET_OUTPUT_STREAM = new ClosedServletOutputStream();
-    
+
     @Override
     public void write(final int b) throws IOException {
       throw new IOException("write(" + b + ") failed: stream is closed");
     }
-    
+
     @Override
     public void flush() throws IOException {
       throw new IOException("flush() failed: stream is closed");
@@ -596,7 +609,7 @@ public class SolrDispatchFilter extends BaseSolrFilter {
       + "use a CloseShield*Stream. Closing or flushing the response stream commits the response and prevents us from modifying it. "
       + "Closing the request stream prevents us from gauranteeing ourselves that streams are fully read for proper connection reuse."
       + "Let the container manage the lifecycle of these streams when possible.";
- 
+
 
   /**
    * Check if audit logging is enabled and should happen for given event type
@@ -605,7 +618,7 @@ public class SolrDispatchFilter extends BaseSolrFilter {
   private boolean shouldAudit(AuditEvent.EventType eventType) {
     return cores.getAuditLoggerPlugin() != null && cores.getAuditLoggerPlugin().shouldLog(eventType);
   }
-  
+
   /**
    * Wrap the request's input stream with a close shield. If this is a
    * retry, we will assume that the stream has already been wrapped and do nothing.
@@ -676,7 +689,7 @@ public class SolrDispatchFilter extends BaseSolrFilter {
       return response;
     }
   }
-  
+
   public void closeOnDestroy(boolean closeOnDestroy) {
     this.closeOnDestroy = closeOnDestroy;
   }
