@@ -13,8 +13,9 @@
     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
     See the License for the specific language governing permissions and
     limitations under the License.
- -->
 
+ -->
+ 
 # Apache Lucene and Solr have separate repositories now!
 
 Solr has become a top-level Apache project and main line 
